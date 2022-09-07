@@ -24,7 +24,11 @@
 //! extern crate preferences;
 //! use preferences::{AppInfo, PreferencesMap, Preferences};
 //!
-//! const APP_INFO: AppInfo = AppInfo{name: "preferences", author: "Rust language community"};
+//! const APP_INFO: AppInfo = AppInfo {
+//!     qualifier: "",
+//!     organization: "Rust language community",
+//!     application: "preferences",
+//! };
 //!
 //! fn main() {
 //!
@@ -54,11 +58,15 @@
 //! # Using custom data types
 //! ```
 //! #[macro_use]
-//! extern crate serde_derive;
+//! extern crate serde;
 //! extern crate preferences;
 //! use preferences::{AppInfo, Preferences};
 //!
-//! const APP_INFO: AppInfo = AppInfo{name: "preferences", author: "Rust language community"};
+//! const APP_INFO: AppInfo = AppInfo {
+//!     qualifier: "",
+//!     organization: "Rust language community",
+//!     application: "preferences",
+//! };
 //!
 //! // Deriving `Serialize` and `Deserialize` on a struct/enum automatically implements
 //! // the `Preferences` trait.
@@ -87,11 +95,15 @@
 //! # Using custom data types with `PreferencesMap`
 //! ```
 //! #[macro_use]
-//! extern crate serde_derive;
+//! extern crate serde;
 //! extern crate preferences;
 //! use preferences::{AppInfo, PreferencesMap, Preferences};
 //!
-//! const APP_INFO: AppInfo = AppInfo{name: "preferences", author: "Rust language community"};
+//! const APP_INFO: AppInfo = AppInfo {
+//!     qualifier: "",
+//!     organization: "Rust language community",
+//!     application: "preferences",
+//! };
 //!
 //! #[derive(Serialize, Deserialize, PartialEq, Debug)]
 //! struct Point(f32, f32);
@@ -116,11 +128,15 @@
 //! # Using custom data types with serializable containers
 //! ```
 //! #[macro_use]
-//! extern crate serde_derive;
+//! extern crate serde;
 //! extern crate preferences;
 //! use preferences::{AppInfo, Preferences};
 //!
-//! const APP_INFO: AppInfo = AppInfo{name: "preferences", author: "Rust language community"};
+//! const APP_INFO: AppInfo = AppInfo {
+//!     qualifier: "",
+//!     organization: "Rust language community",
+//!     application: "preferences",
+//! };
 //!
 //! #[derive(Serialize, Deserialize, PartialEq, Debug)]
 //! struct Point(usize, usize);
@@ -167,25 +183,39 @@
 
 #![warn(missing_docs)]
 
-extern crate app_dirs;
+extern crate directories;
 extern crate serde;
-extern crate serde_json;
 
-pub use app_dirs::{AppDirsError, AppInfo};
-use app_dirs::{AppDataType, get_data_root, get_app_dir};
-use serde::Serialize;
+use directories::ProjectDirs;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs::{File, create_dir_all};
+use std::fs::{create_dir_all, File};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::string::FromUtf8Error;
 
-const DATA_TYPE: AppDataType = AppDataType::UserConfig;
 static PREFS_FILE_EXTENSION: &'static str = ".prefs.json";
 static DEFAULT_PREFS_FILENAME: &'static str = "prefs.json";
+
+/// Application's information used to determine the preferences location.
+pub struct AppInfo {
+    /// The reverse domain name notation of the application, excluding the organization or application name itself.<br/>
+    /// An empty string can be passed if no qualifier should be used (only affects macOS).
+    /// Example values: `"com.example"`, `"org"`, `"uk.co"`, `"io"`, `""`
+    pub qualifier: &'static str,
+
+    /// The name of the organization that develops this application, or for which the application is developed.<br/>
+    /// An empty string can be passed if no organization should be used (only affects macOS and Windows).<br/>
+    /// Example values: `"Foo Corp"`, `"Alice and Bob Inc"`, `""`
+    pub organization: &'static str,
+
+    /// The name of the application itself.<br/>
+    /// Example values: `"Bar App"`, `"ExampleProgram"`, `"Unicorn-Programme"`
+    pub application: &'static str,
+}
 
 /// Generic key-value store for user data.
 ///
@@ -209,7 +239,7 @@ pub enum PreferencesError {
     /// An error occurred during preferences file I/O.
     Io(io::Error),
     /// Couldn't figure out where to put or find the serialized data.
-    Directory(AppDirsError),
+    Directory,
 }
 
 impl fmt::Display for PreferencesError {
@@ -218,27 +248,19 @@ impl fmt::Display for PreferencesError {
         match *self {
             Json(ref e) => e.fmt(f),
             Io(ref e) => e.fmt(f),
-            Directory(ref e) => e.fmt(f),
+            Directory => "Couldn't find the preferences directory.".fmt(f),
         }
     }
 }
 
 impl std::error::Error for PreferencesError {
-    fn description(&self) -> &str {
+    fn cause(&self) -> Option<&dyn std::error::Error> {
         use PreferencesError::*;
         match *self {
-            Json(ref e) => e.description(),
-            Io(ref e) => e.description(),
-            Directory(ref e) => e.description(),
+            Json(ref e) => Some(e),
+            Io(ref e) => Some(e),
+            Directory => None,
         }
-    }
-    fn cause(&self) -> Option<&std::error::Error> {
-        use PreferencesError::*;
-        Some(match *self {
-            Json(ref e) => e,
-            Io(ref e) => e,
-            Directory(ref e) => e,
-        })
     }
 }
 
@@ -263,12 +285,6 @@ impl From<std::io::Error> for PreferencesError {
     }
 }
 
-impl From<AppDirsError> for PreferencesError {
-    fn from(e: AppDirsError) -> Self {
-        PreferencesError::Directory(e)
-    }
-}
-
 /// Trait for types that can be saved & loaded as user data.
 ///
 /// This type is automatically implemented for any struct/enum `T` which implements both
@@ -281,7 +297,11 @@ impl From<AppDirsError> for PreferencesError {
 ///
 /// ```
 /// use preferences::AppInfo;
-/// const APP_INFO: AppInfo = AppInfo{name: "Awesome App", author: "Dedicated Dev"};
+/// const APP_INFO: AppInfo = AppInfo{
+///     qualifier: "", // This is optionnal
+///     organization: "Dedicated Dev",
+///     application: "Awesome App",
+/// };
 /// ```
 ///
 /// The `key` parameter of `save(..)` and `load(..)` should be used to uniquely identify different
@@ -317,25 +337,34 @@ pub trait Preferences: Sized {
 }
 
 fn compute_file_path<S: AsRef<str>>(app: &AppInfo, key: S) -> Result<PathBuf, PreferencesError> {
-    let mut path = get_app_dir(DATA_TYPE, app, key.as_ref())?;
-    let new_name = match path.file_name() {
-        Some(name) if !name.is_empty() => {
-            let mut new_name = OsString::with_capacity(name.len() + PREFS_FILE_EXTENSION.len());
-            new_name.push(name);
-            new_name.push(PREFS_FILE_EXTENSION);
-            new_name
-        }
-        _ => DEFAULT_PREFS_FILENAME.into(),
-    };
-    path.set_file_name(new_name);
-    Ok(path)
+    if let Some(path) = prefs_base_dir(&app) {
+        let mut path = path.join(key.as_ref().to_string());
+
+        let new_name = match path.file_name() {
+            Some(name) if !name.is_empty() => {
+                let mut new_name = OsString::with_capacity(name.len() + PREFS_FILE_EXTENSION.len());
+                new_name.push(name);
+                new_name.push(PREFS_FILE_EXTENSION);
+                new_name
+            }
+            _ => DEFAULT_PREFS_FILENAME.into(),
+        };
+
+        path.set_file_name(new_name);
+
+        Ok(path)
+    } else {
+        Err(PreferencesError::Directory)
+    }
 }
 
 impl<T> Preferences for T
-    where T: Serialize + DeserializeOwned + Sized
+where
+    T: Serialize + DeserializeOwned + Sized,
 {
     fn save<S>(&self, app: &AppInfo, key: S) -> Result<(), PreferencesError>
-        where S: AsRef<str>
+    where
+        S: AsRef<str>,
     {
         let path = compute_file_path(app, key.as_ref())?;
         path.parent().map(create_dir_all);
@@ -355,21 +384,26 @@ impl<T> Preferences for T
     }
 }
 
-/// Get full path to the base directory for preferences.
+/// Get full path to the base directory for your application's preferences.
 ///
 /// This makes no guarantees that the specified directory path actually *exists* (though you can
 /// easily use `std::fs::create_dir_all(..)`). Returns `None` if the directory cannot be determined
 /// or is not available on the current platform.
-pub fn prefs_base_dir() -> Option<PathBuf> {
-    get_data_root(AppDataType::UserConfig).ok()
+pub fn prefs_base_dir(app: &AppInfo) -> Option<PathBuf> {
+    if let Some(dirs) = ProjectDirs::from(&app.qualifier, &app.organization, &app.application) {
+        Some(dirs.preference_dir().to_path_buf())
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use {AppInfo, Preferences, PreferencesMap};
     const APP_INFO: AppInfo = AppInfo {
-        name: "preferences",
-        author: "Rust language community",
+        qualifier: "",
+        application: "preferences",
+        organization: "Rust language community",
     };
     const TEST_PREFIX: &'static str = "tests/module";
     fn gen_test_name(name: &str) -> String {
